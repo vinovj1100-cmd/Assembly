@@ -16,6 +16,14 @@ import base64
 from cryptography.fernet import Fernet
 import logging
 
+# Attempt to import Google Sheets dependencies
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSHEETS_AVAILABLE = True
+except ImportError:
+    GSHEETS_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ------------------ CONFIG CONSTANTS ------------------
 EXPORT_FORMAT_OPTIONS = ["CSV", "Excel", "JSON", "PDF Report"]
 
-# ------------------ 1. SECURITY ------------------
+# ------------------ 1. SECURITY & ENCRYPTION ------------------
 ENCRYPTION_KEY_ENV = os.getenv('OZON_ENCRYPTION_KEY')
 if ENCRYPTION_KEY_ENV:
     ENCRYPTION_KEY = ENCRYPTION_KEY_ENV.encode() if isinstance(ENCRYPTION_KEY_ENV, str) else ENCRYPTION_KEY_ENV
@@ -33,13 +41,45 @@ else:
     ENCRYPTION_KEY = Fernet.generate_key()
     cipher_suite = Fernet(ENCRYPTION_KEY)
 
-def encrypt_data(data):
-    return cipher_suite.encrypt(data.encode()).decode()
+# ------------------ 2. GOOGLE SHEETS SYNC ENGINE ------------------
+def init_gsheets_client(json_credentials_str):
+    """Initialize Google Sheets client using Service Account JSON"""
+    if not GSHEETS_AVAILABLE:
+        st.error("Missing libraries. Please run: pip install gspread google-auth")
+        return None
+    
+    try:
+        creds_dict = json.loads(json_credentials_str)
+        scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(credentials)
+        return client
+    except Exception as e:
+        st.error(f"Failed to authenticate Google Sheets: {e}")
+        return None
 
-def decrypt_data(encrypted_data):
-    return cipher_suite.decrypt(encrypted_data.encode()).decode()
+def push_to_gsheets(client, url, dataframe):
+    """Overwrites the target Google Sheet with the current DataFrame"""
+    try:
+        sheet = client.open_by_url(url).sheet1
+        sheet.clear()
+        sheet.update([dataframe.columns.values.tolist()] + dataframe.values.tolist())
+        return True
+    except Exception as e:
+        st.error(f"Failed to sync to Google Sheets: {e}")
+        return False
 
-# ------------------ 2. PDF PROCESSING ------------------
+def pull_from_gsheets(client, url):
+    """Pulls data from Google Sheets into a Pandas DataFrame"""
+    try:
+        sheet = client.open_by_url(url).sheet1
+        data = sheet.get_all_records()
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Failed to pull from Google Sheets: {e}")
+        return None
+
+# ------------------ 3. PDF PROCESSING ------------------
 def extract_text_from_pdf(pdf_bytes):
     try:
         pdf_reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
@@ -51,66 +91,7 @@ def extract_text_from_pdf(pdf_bytes):
         st.error(f"❌ Error extracting text from PDF: {str(e)}")
         return None
 
-def parse_barcode_from_pdf(pdf_bytes):
-    try:
-        images = convert_from_bytes(pdf_bytes)
-        all_data = []
-        for i, image in enumerate(images):
-            text = pytesseract.image_to_string(image)
-            tracking_numbers = re.findall(r'\b\d{4,12}-?\d{4}-?\d?\b', text)
-            if tracking_numbers:
-                for tn in tracking_numbers:
-                    all_data.append({
-                        'tracking_id': tn,
-                        'page': i + 1,
-                        'raw_text': text[:200]
-                    })
-        return all_data
-    except Exception as e:
-        st.error(f"❌ Error processing PDF: {str(e)}")
-        return None
-
-# ------------------ 3. EXPORT FUNCTIONALITY ------------------
-def export_data(data, format_type, operator_name, prefix="ozon_export"):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{prefix}_{operator_name}_{timestamp}"
-
-    try:
-        fmt = (format_type or "").strip().lower()
-
-        if fmt == "csv":
-            if isinstance(data, dict):
-                df = pd.DataFrame.from_dict(data, orient='index')
-            else:
-                df = pd.DataFrame(data)
-            csv = df.to_csv(index=False)
-            st.download_button(label="Download CSV", data=csv, file_name=f"{filename}.csv", mime="text/csv")
-
-        elif fmt in ("excel", "xlsx"):
-            if isinstance(data, dict):
-                with pd.ExcelWriter(f"{filename}.xlsx") as writer:
-                    for key, value in data.items():
-                        if isinstance(value, list):
-                            df = pd.DataFrame(value)
-                            df.to_excel(writer, sheet_name=key.replace('_', ' ')[:31], index=False)
-                        else:
-                            df = pd.DataFrame(data)
-                            df.to_excel(writer, sheet_name="Data", index=False)
-            else:
-                df = pd.DataFrame(data)
-                df.to_excel(f"{filename}.xlsx", index=False)
-
-            with open(f"{filename}.xlsx", 'rb') as f:
-                st.download_button(label="Download Excel", data=f.read(), file_name=f"{filename}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-        elif fmt == "json":
-            json_data = json.dumps(data, indent=2, default=str)
-            st.download_button(label="Download JSON", data=json_data, file_name=f"{filename}.json", mime="application/json")
-
-    except Exception as e:
-        st.error(f"❌ Export failed: {str(e)}")
-
-# ==================== UTILITY FUNCTIONS ====================
+# ------------------ 4. UTILITIES & DATA MAPPING ------------------
 def robust_parse_multiline(text_data):
     SCANNING_ID_REGEX = re.compile(r"\b\d{4,12}-?\d{4}-?\d?\b")
     data_map = {}
@@ -142,129 +123,162 @@ def standardize_title(raw_text):
             text = text.replace(key, value)
     return text.strip()
 
-# ------------------ 4. MAIN APPLICATION & SESSION INIT ------------------
+# ------------------ 5. INITIALIZATION & STATE MANAGEMENT ------------------
+st.set_page_config(page_title="Ozon WMS Pro", layout="wide", page_icon="🏢", initial_sidebar_state="expanded")
+
+if 'session_hash' not in st.session_state:
+    st.session_state.session_hash = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
 if 'audit_results' not in st.session_state:
     st.session_state.audit_results = []
 if 'translation_history' not in st.session_state:
     st.session_state.translation_history = []
 
-# Mock Inventory Database
+# WMS Default Databases (Used if GSheets are not linked)
 if 'inventory_db' not in st.session_state:
     st.session_state.inventory_db = pd.DataFrame([
         {"SKU": "APP-IP15-256-BLK", "Product": "APPLE IPHONE 15 256GB BLACK", "Stock": 45, "Location": "A1-01"},
         {"SKU": "APP-IP15P-256-ORG", "Product": "APPLE IPHONE 15 PRO COSMIC ORANGE 256GB", "Stock": 8, "Location": "A1-02"},
-        {"SKU": "SAM-S24-512-GRY", "Product": "SAMSUNG GALAXY S24 TITAN GRAY 512GB", "Stock": 12, "Location": "B2-15"},
-        {"SKU": "POC-F6-512-BLK", "Product": "POCO F6 12/512GB BLACK", "Stock": 150, "Location": "C4-05"}
+        {"SKU": "SAM-S24-512-GRY", "Product": "SAMSUNG GALAXY S24 TITAN GRAY 512GB", "Stock": 12, "Location": "B2-15"}
     ])
 
-# Mock Daily Orders Database
 if 'daily_orders' not in st.session_state:
-    st.session_state.daily_orders = [
-        {"Order ID": "ORD-9981", "Status": "Pending", "Required SKUs": ["APP-IP15P-256-ORG", "POC-F6-512-BLK"]},
-        {"Order ID": "ORD-9982", "Status": "Pending", "Required SKUs": ["SAM-S24-512-GRY", "SAM-S24-512-GRY"]},
-        {"Order ID": "ORD-9983", "Status": "Shipped", "Required SKUs": ["APP-IP15-256-BLK"]}
-    ]
+    st.session_state.daily_orders = pd.DataFrame([
+        {"Order ID": "ORD-9981", "Status": "Pending", "Required SKUs": "APP-IP15P-256-ORG, SAM-S24-512-GRY"},
+        {"Order ID": "ORD-9982", "Status": "Pending", "Required SKUs": "SAM-S24-512-GRY"},
+        {"Order ID": "ORD-9983", "Status": "Shipped", "Required SKUs": "APP-IP15-256-BLK"}
+    ])
 
 SCANNING_ID_REGEX = re.compile(r"\b\d{4,12}-?\d{4}-?\d?\b")
 
-st.set_page_config(page_title="Ozon Master Tool Pro", layout="wide", page_icon="📦", initial_sidebar_state="expanded")
-
-# Sidebar
+# ------------------ 6. SIDEBAR CONFIGURATION ------------------
 with st.sidebar:
-    st.image("https://icons8.com", width=80)
-    st.title("Operator Settings")
+    st.title("🏢 WMS Operator")
     operator_name = st.text_input("Operator Name", value="Staff_01")
     
     st.divider()
-    st.subheader("📷 Default Scanner Setup")
-    sidebar_scan_dpi = st.select_slider("Global Resolution (DPI)", options=[150, 200, 300], value=300, key="sidebar_dpi")
+    st.subheader("🔗 Google Sheets Sync")
+    st.caption("Connect your cloud database for real-time tracking.")
+    gsheet_json = st.text_area("Service Account JSON", type="password", help="Paste your Google Service Account JSON here to enable Write access.")
+    inventory_sheet_url = st.text_input("Inventory Sheet URL")
+    orders_sheet_url = st.text_input("Orders Sheet URL")
     
+    if st.button("🔄 Sync with Cloud", type="primary", use_container_width=True):
+        if gsheet_json and inventory_sheet_url:
+            with st.spinner("Syncing to Google Cloud..."):
+                client = init_gsheets_client(gsheet_json)
+                if client:
+                    # Push local inventory to cloud
+                    push_to_gsheets(client, inventory_sheet_url, st.session_state.inventory_db)
+                    if orders_sheet_url:
+                        push_to_gsheets(client, orders_sheet_url, st.session_state.daily_orders)
+                    st.success("✅ Synced successfully!")
+        else:
+            st.warning("⚠️ Provide JSON credentials and at least one Sheet URL to sync.")
+
     st.divider()
-    st.subheader("💾 Export Settings")
-    default_export_format = st.selectbox("Default Export Format", EXPORT_FORMAT_OPTIONS, index=0)
+    st.subheader("📷 Hardware Settings")
+    scan_dpi = st.select_slider("Global Resolution (DPI)", options=[150, 200, 300], value=200, key="sidebar_dpi")
+    st.text(f"Session ID: {st.session_state.session_hash}")
 
-if 'session_hash' not in st.session_state or not st.session_state.session_hash:
-    st.session_state.session_hash = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
+st.title(f"🏢 Ozon WMS Pro Dashboard | **{operator_name}**")
 
-st.title(f"📦 Ozon Master Tool Pro | **{operator_name}**")
-
-# TABS
+# ------------------ 7. TABS LAYOUT ------------------
 tabs = st.tabs([
-    "📊 Dashboard", "📦 Inventory Hub", "🛒 Pick & Pack", 
-    "🔍 PDF Sort", "⚖️ Auditor", "🌐 Translator", "🔄 Bulk Convert", "📋 Export"
+    "📊 Dashboard", "📥 Inbound Receiving", "📦 Inventory", "🛒 Pick & Pack", 
+    "🔙 Returns", "🔍 PDF Sequencer", "⚖️ Auditor", "🔄 Bulk Convert"
 ])
 
 # --- TAB 1: DASHBOARD ---
 with tabs[0]:
-    st.subheader("📊 **Warehouse Command Center**")
+    st.subheader("📊 **Warehouse Operations Center**")
     
-    # Calculate live metrics
-    total_stock = st.session_state.inventory_db['Stock'].sum()
-    low_stock_items = len(st.session_state.inventory_db[st.session_state.inventory_db['Stock'] < 10])
-    pending_orders = len([o for o in st.session_state.daily_orders if o['Status'] == 'Pending'])
-    shipped_orders = len([o for o in st.session_state.daily_orders if o['Status'] == 'Shipped'])
+    total_stock = st.session_state.inventory_db['Stock'].sum() if not st.session_state.inventory_db.empty else 0
+    low_stock = len(st.session_state.inventory_db[st.session_state.inventory_db['Stock'] < 10]) if not st.session_state.inventory_db.empty else 0
+    pending_orders = len(st.session_state.daily_orders[st.session_state.daily_orders['Status'] == 'Pending'])
+    shipped_orders = len(st.session_state.daily_orders[st.session_state.daily_orders['Status'] == 'Shipped'])
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("📦 Total Items in Stock", total_stock)
-    m2.metric("⚠️ Low Stock Alerts", low_stock_items, delta_color="inverse")
+    m2.metric("⚠️ Low Stock Alerts", low_stock, delta_color="inverse")
     m3.metric("⏳ Pending Orders", pending_orders)
-    m4.metric("✅ Orders Shipped Today", shipped_orders)
+    m4.metric("✅ Shipped Today", shipped_orders)
 
     st.divider()
-    st.markdown("#### 📡 API Status Checker")
-    status_input = st.text_area("Paste Tracking Numbers to Check External Status", height=100)
+    st.markdown("### 📡 Quick External Tracking")
+    status_input = st.text_area("Paste External Tracking Numbers", height=100)
     if st.button("Check API Status"):
-        tracking_numbers = SCANNING_ID_REGEX.findall(status_input)
-        if tracking_numbers:
-            results = [{'Tracking ID': tn, 'Status': 'In Transit', 'Location': 'Moscow Hub', 'Updated': datetime.now().strftime('%H:%M')} for tn in tracking_numbers]
+        tn_list = SCANNING_ID_REGEX.findall(status_input)
+        if tn_list:
+            results = [{'Tracking ID': tn, 'Status': 'In Transit', 'Location': 'Moscow Hub', 'Updated': datetime.now().strftime('%H:%M')} for tn in tn_list]
             st.dataframe(pd.DataFrame(results), use_container_width=True)
-        else:
-            st.warning("⚠️ No valid tracking numbers found.")
 
-# --- TAB 2: INVENTORY HUB ---
+# --- TAB 2: INBOUND RECEIVING ---
 with tabs[1]:
-    st.subheader("📦 **Live Inventory Management**")
+    st.subheader("📥 **Inbound Freight & Receiving**")
+    st.markdown("Log new deliveries to add them to your warehouse inventory.")
     
-    # Low stock alert banner
+    col_in1, col_in2, col_in3 = st.columns(3)
+    with col_in1:
+        inbound_sku = st.text_input("Scan / Enter SKU")
+    with col_in2:
+        inbound_qty = st.number_input("Quantity Received", min_value=1, value=1)
+    with col_in3:
+        inbound_bin = st.text_input("Assign to Bin Location", placeholder="e.g., C4-10")
+        
+    inbound_desc = st.text_input("Product Description (If New SKU)")
+
+    if st.button("➕ Receive Inventory", type="primary"):
+        if inbound_sku:
+            inv = st.session_state.inventory_db
+            if inbound_sku in inv['SKU'].values:
+                # Update existing
+                idx = inv.index[inv['SKU'] == inbound_sku].tolist()[0]
+                inv.at[idx, 'Stock'] += inbound_qty
+                if inbound_bin: inv.at[idx, 'Location'] = inbound_bin
+                st.success(f"✅ Added {inbound_qty} units to existing SKU: {inbound_sku}")
+            else:
+                # Create new
+                new_row = pd.DataFrame([{"SKU": inbound_sku, "Product": inbound_desc or "Unknown Product", "Stock": inbound_qty, "Location": inbound_bin or "UNASSIGNED"}])
+                st.session_state.inventory_db = pd.concat([inv, new_row], ignore_index=True)
+                st.success(f"✅ Created new SKU and received {inbound_qty} units.")
+        else:
+            st.error("Please enter a SKU.")
+
+# --- TAB 3: INVENTORY HUB ---
+with tabs[2]:
+    st.subheader("📦 **Inventory Management**")
     low_stock_df = st.session_state.inventory_db[st.session_state.inventory_db['Stock'] < 10]
     if not low_stock_df.empty:
-        st.warning(f"⚠️ **ACTION REQUIRED:** {len(low_stock_df)} items are running low on stock (Less than 10 units).")
+        st.warning(f"⚠️ **ACTION REQUIRED:** {len(low_stock_df)} SKUs require restocking.")
     
-    # Display Editable Dataframe
-    st.markdown("### Current Stock Levels")
-    # Using data_editor allows the operator to manually update stock levels directly in the UI
-    edited_df = st.data_editor(
+    st.markdown("### Master Stock List")
+    edited_inv = st.data_editor(
         st.session_state.inventory_db, 
         use_container_width=True, 
         num_rows="dynamic",
-        column_config={
-            "Stock": st.column_config.NumberColumn("Stock", help="Current units in warehouse", min_value=0, step=1)
-        }
+        column_config={"Stock": st.column_config.NumberColumn("Stock", min_value=0, step=1)}
     )
-    # Save edits back to session state
-    st.session_state.inventory_db = edited_df
+    st.session_state.inventory_db = edited_inv
 
-# --- TAB 3: PICK & PACK ---
-with tabs[2]:
-    st.subheader("🛒 **Daily Fulfillment: Pick & Pack**")
-    st.markdown("Select a pending order, scan the items placed in the box, and verify the pack.")
-
-    # Filter pending orders
-    pending_list = [o for o in st.session_state.daily_orders if o['Status'] == 'Pending']
+# --- TAB 4: PICK & PACK ---
+with tabs[3]:
+    st.subheader("🛒 **Fulfillment: Pick & Pack**")
     
-    if not pending_list:
-        st.success("🎉 All caught up! No pending orders to fulfill right now.")
+    pending_df = st.session_state.daily_orders[st.session_state.daily_orders['Status'] == 'Pending']
+    
+    if pending_df.empty:
+        st.success("🎉 All caught up! No pending orders.")
     else:
         col_ord, col_scan = st.columns(2)
         
         with col_ord:
-            selected_order_id = st.selectbox("Select Order to Pack", [o['Order ID'] for o in pending_list])
-            current_order = next(o for o in pending_list if o['Order ID'] == selected_order_id)
+            selected_order_id = st.selectbox("Select Order", pending_df['Order ID'].tolist())
+            current_order = pending_df[pending_df['Order ID'] == selected_order_id].iloc[0]
+            req_skus = [s.strip() for s in current_order['Required SKUs'].split(',')]
             
-            st.info(f"**Target Order:** {current_order['Order ID']}")
-            st.write("**Required SKUs for this box:**")
-            for sku in current_order['Required SKUs']:
-                # Find product name for better UX
+            st.info(f"**Packing Order:** {selected_order_id}")
+            st.write("**Required SKUs:**")
+            for sku in req_skus:
                 prod_name = st.session_state.inventory_db.loc[st.session_state.inventory_db['SKU'] == sku, 'Product']
                 p_label = prod_name.values[0] if not prod_name.empty else "Unknown SKU"
                 st.markdown(f"- 📦 `{sku}` ({p_label})")
@@ -272,42 +286,64 @@ with tabs[2]:
         with col_scan:
             scanned_skus_input = st.text_area("Barcode Scanner Input", placeholder="Scan items here (one per line)...", height=150)
             
-            if st.button("✅ Verify & Pack Box", type="primary", use_container_width=True):
+            if st.button("✅ Verify & Ship", type="primary", use_container_width=True):
                 scanned_list = [s.strip() for s in scanned_skus_input.split('\n') if s.strip()]
-                required_list = current_order['Required SKUs'].copy()
                 
-                # Sort both to compare exactly
-                if sorted(scanned_list) == sorted(required_list):
-                    st.success("✅ **PACK MATCH!** The box is verified and ready to ship.")
-                    
-                    # Update Order Status
-                    for idx, o in enumerate(st.session_state.daily_orders):
-                        if o['Order ID'] == current_order['Order ID']:
-                            st.session_state.daily_orders[idx]['Status'] = 'Shipped'
-                            
-                    # Deduct from Inventory
+                if sorted(scanned_list) == sorted(req_skus):
+                    st.success("✅ **MATCH!** Box verified and shipped.")
+                    # Mark Shipped
+                    st.session_state.daily_orders.loc[st.session_state.daily_orders['Order ID'] == selected_order_id, 'Status'] = 'Shipped'
+                    # Deduct Inventory
                     for sku in scanned_list:
-                        st.session_state.inventory_db.loc[st.session_state.inventory_db['SKU'] == sku, 'Stock'] -= 1
-                        
+                        if sku in st.session_state.inventory_db['SKU'].values:
+                            idx = st.session_state.inventory_db.index[st.session_state.inventory_db['SKU'] == sku].tolist()[0]
+                            st.session_state.inventory_db.at[idx, 'Stock'] = max(0, st.session_state.inventory_db.at[idx, 'Stock'] - 1)
                     st.balloons()
+                    st.rerun()
                 else:
-                    st.error("❌ **PACK MISMATCH!** The scanned items do not match the required order.")
-                    st.write(f"**Expected:** {sorted(required_list)}")
-                    st.write(f"**Scanned:** {sorted(scanned_list)}")
+                    st.error("❌ **MISMATCH!** Do not ship this box.")
+                    st.write(f"Expected: {sorted(req_skus)}")
+                    st.write(f"Scanned: {sorted(scanned_list)}")
 
-# --- TAB 4: PDF SORT ---
-with tabs[3]:
+# --- TAB 5: RETURNS ---
+with tabs[4]:
+    st.subheader("🔙 **Returns Processing**")
+    st.markdown("Process inbound returns, mark order as returned, and place items back into active inventory.")
+    
+    ret_order = st.text_input("Original Order ID (Optional)")
+    ret_sku = st.text_input("Scan Returned SKU")
+    ret_reason = st.selectbox("Return Reason", ["Customer Cancelled", "Defective/Damaged", "Wrong Item Shipped", "Undeliverable"])
+    
+    if st.button("🔄 Process Return", type="primary"):
+        if ret_sku:
+            if ret_reason == "Defective/Damaged":
+                st.warning(f"⚠️ Logged {ret_sku} as damaged. Item NOT added back to active inventory.")
+            else:
+                inv = st.session_state.inventory_db
+                if ret_sku in inv['SKU'].values:
+                    idx = inv.index[inv['SKU'] == ret_sku].tolist()[0]
+                    inv.at[idx, 'Stock'] += 1
+                    st.success(f"✅ Restocked 1 unit of {ret_sku}.")
+                else:
+                    st.info(f"SKU {ret_sku} not found in inventory. Please use Inbound Receiving to create it.")
+            
+            if ret_order and ret_order in st.session_state.daily_orders['Order ID'].values:
+                st.session_state.daily_orders.loc[st.session_state.daily_orders['Order ID'] == ret_order, 'Status'] = 'Returned'
+                st.success(f"Order {ret_order} status updated to 'Returned'.")
+        else:
+            st.error("Please scan a returning SKU.")
+
+# --- TAB 6: PDF SEQUENCER ---
+with tabs[5]:
     st.subheader("🔍 **Pro PDF Label Sequencer**")
     col1, col2 = st.columns([1, 2])
     with col1:
         sort_list = st.text_area("🎯 Target Sequence Order", height=300, placeholder="Paste Tracking IDs here...")
     with col2:
         label_file = st.file_uploader("📄 Upload Labels PDF (Bulk)", type="pdf")
-        with st.expander("⚙️ PDF Scanner Settings"):
-            scan_dpi = st.select_slider("Resolution (DPI)", options=[150, 200, 300], value=200, key="tab2_dpi")
-            use_ocr = st.checkbox("Enable OCR Fallback", value=True)
+        use_ocr = st.checkbox("Enable OCR Fallback", value=True)
 
-    if st.button("🚀 Scan, Sort & Generate PDF", type="primary", use_container_width=True):
+    if st.button("🚀 Scan & Sort PDF", type="primary", use_container_width=True):
         target_ids = [tid.strip() for tid in sort_list.split('\n') if tid.strip()]
         if not target_ids or not label_file:
             st.warning("⚠️ Provide sequence IDs and upload a PDF.")
@@ -328,10 +364,9 @@ with tabs[3]:
 
                     matched_count = 0
                     for tid in target_ids:
-                        clean_tid_match = SCANNING_ID_REGEX.search(tid)
-                        search_key = clean_tid_match.group() if clean_tid_match else tid
-                        if search_key in id_to_page_map:
-                            pdf_writer.add_page(id_to_page_map[search_key])
+                        clean_tid = SCANNING_ID_REGEX.search(tid).group() if SCANNING_ID_REGEX.search(tid) else tid
+                        if clean_tid in id_to_page_map:
+                            pdf_writer.add_page(id_to_page_map[clean_tid])
                             matched_count += 1
 
                     if matched_count > 0:
@@ -344,12 +379,12 @@ with tabs[3]:
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
 
-# --- TAB 5: AUDITOR ---
-with tabs[4]:
-    st.subheader("⚖️ **Verification Auditor**")
+# --- TAB 7: AUDITOR ---
+with tabs[6]:
+    st.subheader("⚖️ **Discrepancy Auditor**")
     col_a, col_b = st.columns(2)
-    with col_a: master_in = st.text_area("**MASTER (Expected)**", height=300)
-    with col_b: scan_in = st.text_area("**SCAN (Actual)**", height=300)
+    with col_a: master_in = st.text_area("**MASTER (Expected)**", height=200)
+    with col_b: scan_in = st.text_area("**SCAN (Actual)**", height=200)
 
     if st.button("⚡ Run Discrepancy Analysis"):
         if master_in and scan_in:
@@ -358,53 +393,28 @@ with tabs[4]:
             for tid in sorted(list(set(m_map.keys()) | set(s_map.keys()))):
                 exp, got = m_map.get(tid, set()), s_map.get(tid, set())
                 status = "✅ MATCH" if exp == got else "❌ ERROR"
-                results.append({"Tracking ID": tid, "Status": status, "Expected": " | ".join(exp), "Actual": " | ".join(got)})
+                results.append({"ID": tid, "Status": status, "Expected": " | ".join(exp), "Actual": " | ".join(got)})
             
-            df = pd.DataFrame(results)
-            st.dataframe(df.style.apply(lambda x: ['background-color: #ffcccc' if '❌' in str(v) else '' for v in x], axis=1), use_container_width=True)
+            st.dataframe(pd.DataFrame(results).style.apply(lambda x: ['background-color: #ffcccc' if '❌' in str(v) else '' for v in x], axis=1), use_container_width=True)
 
-# --- TAB 6: TRANSLATOR ---
-with tabs[5]:
-    st.subheader("🌐 **Instant Translator**")
-    col1, col2 = st.columns(2)
-    with col1: source_lang = st.selectbox("Source", ["auto", "ru", "en", "zh-cn"])
-    with col2: target_lang = st.selectbox("Target", ["en", "ru", "de", "es"])
-
-    txt = st.text_area("Enter Text", height=150)
-    if st.button("Translate Text"):
-        try:
-            res = GoogleTranslator(source=source_lang, target=target_lang).translate(txt)
-            st.success("**Translation:** " + res)
-            st.session_state.translation_history.append({'time': datetime.now().strftime('%H:%M:%S'), 'original': txt, 'translated': res})
-        except Exception as e:
-            st.error(f"Translation failed: {e}")
-
-# --- TAB 7: BULK CONVERT ---
-with tabs[6]:
+# --- TAB 8: BULK CONVERT ---
+with tabs[7]:
     st.subheader("🔄 **Bulk Title Converter (White to Green)**")
     col_w, col_g = st.columns(2)
     with col_w: white_col = st.text_area("📄 Input (Original Titles)", height=300)
     
-    if st.button("✨ Convert to Green Column", type="primary"):
+    if st.button("✨ Convert & Translate", type="primary"):
         if white_col:
-            lines = white_col.strip().split('\n')
-            results = [standardize_title(GoogleTranslator(source='auto', target='en').translate(l)) if l.strip() else "" for l in lines]
-            with col_g: st.text_area("✅ Output (Standardized)", value="\n".join(results), height=300)
-
-# --- TAB 8: EXPORT ---
-with tabs[7]:
-    st.subheader("📋 **Data Export & Management**")
-    export_format = st.selectbox("Select Export Format", EXPORT_FORMAT_OPTIONS, key="export_tab_format")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("📥 Export Inventory Database"):
-            export_data(st.session_state.inventory_db, export_format, operator_name, "inventory")
-    with col2:
-        if st.button("📥 Export Fulfillment Logs"):
-            export_data(st.session_state.daily_orders, export_format, operator_name, "fulfillment")
-
-    st.divider()
-    if st.button("🗑️ Clear Local Session Data"):
-        st.session_state.clear()
-        st.rerun()
+            with st.spinner("Translating and formatting..."):
+                lines = white_col.strip().split('\n')
+                translator = GoogleTranslator(source='auto', target='en')
+                results = []
+                for l in lines:
+                    if l.strip():
+                        try:
+                            results.append(standardize_title(translator.translate(l)))
+                        except:
+                            results.append(l.upper())
+                    else:
+                        results.append("")
+                with col_g: st.text_area("✅ Output (Standardized)", value="\n".join(results), height=300)
