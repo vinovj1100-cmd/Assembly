@@ -158,7 +158,20 @@ with st.sidebar:
     st.divider()
     st.subheader("🔗 Google Sheets Sync")
     st.caption("Connect your cloud database for real-time tracking.")
-    gsheet_json = st.text_area("Service Account JSON", type="password", help="Paste your Google Service Account JSON here to enable Write access.")
+    gsheet_json = st.text_area("Service Account JSON", type="password", help="{
+  "type": "service_account",
+  "project_id": "ozon-wms-app",
+  "private_key_id": "6953fa6a7a1c1d133d69086385ad44aac61611e4",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCroeXNwcLD/+Bo\nGzSpyOvzpAeN124oyCZEb8LQrhts+8svAL7utge5O5IP3ff4eKYXAybrDu5ko/wO\nFZDrxn+6Ro3WqcExYZau+dFmiJY7AHr3lafejBRAwytf9CsSeOP8Wh0339TqDsc4\n1rvXEQaTvjSHtF9VY3scKTbaKv/rohr8T2oUn25kXHILcR1tLNNu0NakIo0EnGDf\nsC2zNmlCiLbaSB9uzbI1ju39rPsaCBodarR76KkyELea+2jEsJA/sP0qjzXjq86Q\nTNE/uo5aDfrWPSvkbh8C1LWN5VZ4cZQysoEMUgXOArbRAleFXnRtXg6xhgVovqzo\nqC5W4S81AgMBAAECggEAKhJFu1XdeP+SQdq3Yk4c3oyNCH0wJOGJFdoCenZPRTwE\njplDdE7dHlAGqgqKZBco+XedlN2EXNmgqdAqBc2S1jXAw4e5knH+RpZ4uMZO8xgX\nTHTcIS6bsVNWIM+Atma5Vgy94EonDhfAyINEqL+k6dbkWAaEHvGDhj/pEPoc4SSk\nvD7Jsn5HhZd6Um6IuANlhkTkR7CMaSdNmWlYoClThwWqTQB7ZABYBAxwLVBy7gA5\nY6w+Cc6wfZpEYlhbYdBwdET/Net4O0I876GXv4+jje1Pn7jvto8gfCgjw0atM50O\nJ+qe/I6mGCKLcyPaCnXsLwkovYoCh00Ar8y7ICQ20QKBgQDe+z7ov2efYKuRAGcn\nq/cmw61Jt0GicMWVPe0UxLsdSqpJOfuF0fJc6KA8UkgBTvWyYINM3+BW70zDLn1U\n4+U+kiQCR0LvdnFkaXDhKQ0kzZiWLMeCC7K16x14iF6Nxp8BbWy8ydxGtRYtK2Ex\ntQBJIRiHHh0uGqQIh6Y5q9be8QKBgQDFDB6OqJCpLHItnmGE7C6SFNo26Hmi/Owg\nBNmYAE9sXA1mpdICh0W5829w/sVgspao5lyux9sDDXwlRbasSFiUP8qqrYVMRHMf\nPrngqyRy37Y4175MbcFr5pat7hUUmUswW3jls5BmcpQ0rxIJNW1t12ALveXIRuWQ\nqna0V60chQKBgHPcbrq3QduRenQ0lmUJuLk+sZr9CrCiEjhS3g6NjoBQ3JyB8Ux+\nY4WdJi1Rv7JWWdoexfq61TG209cTH/JtHB/gBa/dYU1V6ON42jtUfkziO2fEysGq\n3GgkS8LmcOMQEmzGc9rAtKFU1LoRsUYHu6dD+B+1KQpcs2DvQxLyVAqxAoGBAILH\nEGDOL3SYMw9j1oVJ237IqCtZD6HFC1IU5fWj/xKD5cECvOdAsF5B2uy7qnQLE0L1\n4P1/VzQndwWlxx+AxIlf7Tpp/9Ymd+F82BDshTxYjbAcQAipr33VhJvbL9KECwsF\nKrAJBQV5djOhHe9OrloAX5Zral4J78Kb4DzBE/uhAoGALF5WiovkGA8PAM1m9v2H\nUwPirS+GccHV+JzC7i0lmbJNKyJmprfnCXc5VRm6H+rIGjTBguPyuOdZD1sPFuIO\nn+H0nePBfv42OpRZmphx24HBWlQ5qGuvUchbakHMgXX1yQR73BWbKzR6WLJXxZAk\nQLOaZgThz+kgrADdrcrta/8=\n-----END PRIVATE KEY-----\n",
+  "client_email": "wms-sync-bot@ozon-wms-app.iam.gserviceaccount.com",
+  "client_id": "112824008251090123360",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/wms-sync-bot%40ozon-wms-app.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
+.")
     inventory_sheet_url = st.text_input("Inventory Sheet URL")
     orders_sheet_url = st.text_input("Orders Sheet URL")
     
