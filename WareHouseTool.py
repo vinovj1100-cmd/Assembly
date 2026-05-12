@@ -31,16 +31,6 @@ logger = logging.getLogger(__name__)
 # ------------------ CONFIG CONSTANTS ------------------
 EXPORT_FORMAT_OPTIONS = ["CSV", "Excel", "JSON", "PDF Report"]
 
-# ------------------ 1. SECURITY & ENCRYPTION ------------------
-ENCRYPTION_KEY_ENV = os.getenv('OZON_ENCRYPTION_KEY')
-if ENCRYPTION_KEY_ENV:
-    ENCRYPTION_KEY = ENCRYPTION_KEY_ENV.encode() if isinstance(ENCRYPTION_KEY_ENV, str) else ENCRYPTION_KEY_ENV
-    cipher_suite = Fernet(ENCRYPTION_KEY)
-else:
-    logger.warning("OZON_ENCRYPTION_KEY not set; generating an ephemeral encryption key.")
-    ENCRYPTION_KEY = Fernet.generate_key()
-    cipher_suite = Fernet(ENCRYPTION_KEY)
-
 # ------------------ 2. GOOGLE SHEETS SYNC ENGINE ------------------
 def init_gsheets_client(json_credentials_str):
     """Initialize Google Sheets client using Service Account JSON"""
@@ -158,7 +148,7 @@ with st.sidebar:
     st.divider()
     st.subheader("🔗 Google Sheets Sync")
     st.caption("Connect your cloud database for real-time tracking.")
-    gsheet_json = st.text_area("Service Account JSON", type="password", help="wms-sync-bot@ozon-wms-app.iam.gserviceaccount.com")
+    gsheet_json = st.text_area("Service Account JSON", help="wms-sync-bot@ozon-wms-app.iam.gserviceaccount.com")
     inventory_sheet_url = st.text_input("Inventory Sheet URL")
     orders_sheet_url = st.text_input("Orders Sheet URL")
     
