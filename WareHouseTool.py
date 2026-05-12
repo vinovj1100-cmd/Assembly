@@ -158,7 +158,7 @@ with st.sidebar:
     st.divider()
     st.subheader("🔗 Google Sheets Sync")
     st.caption("Connect your cloud database for real-time tracking.")
-    gsheet_json = st.text_area("Service Account JSON", type="password", help="Paste your Google Service Account JSON here to enable Write access.")
+    gsheet_json = st.text_area("Service Account JSON", type="password", help="wms-sync-bot@ozon-wms-app.iam.gserviceaccount.com")
     inventory_sheet_url = st.text_input("Inventory Sheet URL")
     orders_sheet_url = st.text_input("Orders Sheet URL")
     
